@@ -304,8 +304,6 @@ func (a *AppAuthVaultMethod) VaultDelete(path string) error {
 // deletes the path, not just the secret (see comment for delete).
 func (a *AppAuthVaultMethod) VaultDeleteMetadata(path string) error {
 	path = strings.Replace(path, "/data/", "/metadata/", 1)
-
-	url := fmt.Sprintf("%s/v1/%s", a.VaultServer, path)
 	_, e := a.fetchVaultURL("DELETE", path)
 	return e
 }
