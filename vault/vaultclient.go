@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"time"
+	"strings"
 )
 
 func (a *AppAuthVaultMethod) processCAdir(path string, pool *x509.CertPool) error {
@@ -261,8 +262,55 @@ func (a *AppAuthVaultMethod) VaultWrite(path string, args ...string) error {
 	return e
 }
 
-/*
+func (a *AppAuthVaultMethod) List(path string) ([]string, error) {
+	var rv_err []string
 
+	type VData struct {
+		Keys []string `json:"keys"`
+	}
+		
+	type VList struct {
+		Data VData `json:"data"`
+	}
+
+	path = strings.Replace(path, "/data/", "/metadata/", 1)
+	body, e := a.fetchVaultURL("LIST", path)
+	if e != nil {
+		return rv_err, e
+	}
+
+	var answer VList
+	if err := json.Unmarshal([]byte(body), &answer); err != nil {
+		return rv_err, nil
+	}
+
+	return answer.Data.Keys, nil
+}
+
+//
+// Delete metadata from Vault
+// Ex.: you have 'kv/data/myfirstapp/foo name=foo pass=bar'
+//
+// --> use 'VaultDelete' method on 'kv/myfirstapp/foo'
+//     in order to delete the secrets (name and pass in this example)
+// --> Use 'VaultDeleteMetadata' method on 'kv/myfirstapp/foo'
+//     in order to delete the 'foo' path.
+//
+func (a *AppAuthVaultMethod) VaultDelete(path string) error {
+	_, e := a.fetchVaultURL("DELETE", path)
+	return e
+}
+
+// deletes the path, not just the secret (see comment for delete).
+func (a *AppAuthVaultMethod) VaultDeleteMetadata(path string) error {
+	path = strings.Replace(path, "/data/", "/metadata/", 1)
+
+	url := fmt.Sprintf("%s/v1/%s", a.VaultServer, path)
+	_, e := a.fetchVaultURL("DELETE", path)
+	return e
+}
+
+/*
 #
 # takes $appauthal argument that's a hash of all the things required to
 # talk to vault.
@@ -507,86 +555,6 @@ sub fetch_and_merge_dbauth {
 	}
 
 	$rv;
-}
-
-##############################################################################
-# Delete metadata from Vault
-# Ex.: you have 'kv/data/myfirstapp/foo name=foo pass=bar'
-#
-# --> use 'delete' method on 'kv/myfirstapp/foo'
-#     in order to delete the secrets (name and pass in this example)
-# --> Use 'delete_metadata' method on 'kv/myfirstapp/foo'
-#     in order to delete the 'foo' path.
-##############################################################################
-sub delete {
-	my $self = shift @_;
-	my $path = shift @_;
-	my $data = shift @_;
-
-	my $url = sprintf "%s/v1/%s", $self->{_appauthal}->{VaultServer}, $path;
-
-	my $resp = $self->_fetchurl(
-		method => 'DELETE',
-		url    => $url,
-	);
-
-	if ( !$resp ) {
-
-		# pass back $errstr
-		return undef;
-	} elsif ( $resp->{data} ) {
-		return $resp->{data};
-	} else {
-		return {};
-	}
-}
-
-# deletes the path, not just the secret (see comment for delete).
-sub delete_metadata {
-	my $self = shift @_;
-	my $path = shift @_;
-	( my $real_path = $path ) =~ s/\/data\//\/metadata\//;
-
-	my $url = sprintf "%s/v1/%s", $self->{_appauthal}->{VaultServer},
-	  $real_path;
-
-	my $resp = $self->_fetchurl(
-		method => 'DELETE',
-		url    => $url,
-	);
-
-	if ( !$resp ) {
-
-		# pass back $errstr
-		return undef;
-	} elsif ( $resp->{data} ) {
-		return $resp->{data};
-	} else {
-		return {};
-	}
-}
-
-sub list {
-	my $self = shift @_;
-	my $path = shift @_;
-	my $data = shift @_;
-
-	( my $real_path = $path ) =~ s/\/data\//\/metadata\//;
-
-	my $url = sprintf "%s/v1/%s", $self->{_appauthal}->{VaultServer},
-	  $real_path;
-
-	my $resp = $self->_fetchurl(
-		method => 'LIST',
-		url    => $url,
-	);
-
-	if ( !$resp ) {
-
-		# pass back $errstr
-		return undef;
-	}
-	return $resp->{data}->{keys};
 }
 
 */
