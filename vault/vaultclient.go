@@ -30,8 +30,6 @@ func (a *AppAuthVaultMethod) processCAdir(path string, pool *x509.CertPool) erro
 }
 
 func (a *AppAuthVaultMethod) initializeVaultHTTPClient() error {
-
-	// move to init  XXX
 	caCertPool := x509.NewCertPool()
 	if a.CAPath != "" {
 		if info, err := os.Stat(a.CAPath); err != nil {
@@ -180,7 +178,7 @@ func (a *AppAuthVaultMethod) fetchVaultURLwithToken(token string, method string,
 		req = r
 	}
 
-	req.Header.Set("User-Agent", "golangvaultXXX/0.50")
+	req.Header.Set("User-Agent", "jazzhandscmdbappauthal/0.50")
 	if token != "" {
 		req.Header.Set("X-Vault-Token", token)
 	}

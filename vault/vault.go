@@ -303,7 +303,6 @@ func (a *AppAuthVaultMethod) BuildAppAuthAL(inmap interface{}) (goappauthal.AppA
 	return &rv, nil
 }
 
-// / XXX probably need to have error here.  _sigh_
 func (a *AppAuthVaultAuthEntry) BuildAuthenticateMap() (map[string]string, error) {
 	rv := make(map[string]string)
 
