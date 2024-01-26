@@ -69,7 +69,10 @@ func DoCachedLogin(optmap map[string]interface{}, entry map[string]interface{}, 
 	 * if there's no point in trying to cache, don't.
 	 */
 	if CachingDisabled || !h.ShouldCache() {
-		xlate := appauth.BuildAuthenticateMap()
+		xlate, e := appauth.BuildAuthenticateMap()
+		if e != nil {
+			return nil, e
+		}
 		return callback(xlate, state)
 	}
 
@@ -93,7 +96,8 @@ func DoCachedLogin(optmap map[string]interface{}, entry map[string]interface{}, 
 		cachedcreds = c
 		handle, err := callback(c.Auth, state)
 		if err == nil {
-			if !c.Expire.Before(time.Now()) {
+			now := time.Now()
+			if c.Expire.After(now) {
 				return handle, nil
 			}
 			// otherwise, credentials are expired, but keep just in case
@@ -101,7 +105,10 @@ func DoCachedLogin(optmap map[string]interface{}, entry map[string]interface{}, 
 	}
 
 	// 4, 5
-	xlate := appauth.BuildAuthenticateMap()
+	xlate, e := appauth.BuildAuthenticateMap()
+	if e != nil {
+		return nil, e
+	}
 	handle, err := callback(xlate, state)
 	if err == nil {
 		// 6
@@ -114,16 +121,17 @@ func DoCachedLogin(optmap map[string]interface{}, entry map[string]interface{}, 
 		if rawval, ok := optmap["DefaultCacheDivisor"]; ok {
 			fval := rawval.(float64)
 			divisor := int64(fval)
-			defexpsec = defexpsec / divisor
+			defexpsec = int64(defexpsec / divisor)
 		}
 
-		defexp, _ := time.ParseDuration(string(defexpsec) + "s")
-
-		putCachedAuth(h, appauth, defexp)
-		// XXX probably want to make this available somehow
-		// if e := putCachedAuth(h, appauth, defexp); e !=  nil {
-		// 	fmt.Println("cache fail: ", e)
-		// }
+		defexp, e := time.ParseDuration(fmt.Sprintf("%ds", defexpsec))
+		if e == nil {
+			putCachedAuth(h, appauth, defexp)
+			// XXX probably want to make this available somehow
+			// if e := putCachedAuth(h, appauth, defexp); e !=  nil {
+			// 	fmt.Println("cache fail: ", e)
+			// }
+		}
 		return handle, nil
 	}
 

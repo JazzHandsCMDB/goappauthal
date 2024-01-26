@@ -86,8 +86,8 @@ func (a *AppAuthPasswordMethod) BuildAppAuthAL(inmap interface{}) (AppAuthAuthEn
 }
 
 // entry
-func (a *AppAuthPasswordEntry) BuildAuthenticateMap() map[string]string {
-	return a.authent
+func (a *AppAuthPasswordEntry) BuildAuthenticateMap() (map[string]string, error) {
+	return a.authent, nil
 }
 
 func (a *AppAuthPasswordEntry) GetExpiration() time.Time {

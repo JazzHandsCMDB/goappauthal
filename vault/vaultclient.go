@@ -10,8 +10,8 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"time"
 	"strings"
+	"time"
 )
 
 func (a *AppAuthVaultMethod) processCAdir(path string, pool *x509.CertPool) error {
@@ -61,9 +61,16 @@ func (a *AppAuthVaultMethod) initializeVaultHTTPClient() error {
 // login using an approle, but use a token if the tokenpath is set and it
 // exists.  stash the token in said file if it's a different one.
 func (a *AppAuthVaultMethod) appRole_login() error {
-	// XXX cache check goes here
+	if a.token == "" {
+		tok, err := a.readTokenFile()
+		if err == nil {
+			if a.checkToken(tok) == true {
+				return nil
+			}
+		}
+	}
 
-	body, e := a.fetchVaultURL("POST", "auth/approle/login", "role_id", a.VaultRoleId, "secret_id", a.VaultSecretId)
+	body, e := a.fetchVaultURLwithToken("", "POST", "auth/approle/login", "role_id", a.VaultRoleId, "secret_id", a.VaultSecretId)
 	if e != nil {
 		return e
 	}
@@ -97,7 +104,7 @@ func (a *AppAuthVaultMethod) appRole_login() error {
 				auth[key] = v
 			} else if key == "lease_duration" {
 				f := val.(float64)
-				a.lease_duration = int64(f)
+				a.token_lease_duration = int64(f)
 
 			} else {
 				continue
@@ -105,14 +112,18 @@ func (a *AppAuthVaultMethod) appRole_login() error {
 		}
 	}
 
+	fmt.Println("looking for cliecnt token in ", auth)
 	if tok, ok := auth["client_token"]; !ok {
 		return fmt.Errorf("Response did not include a Client token")
 	} else {
+		fmt.Println("saving token")
 		a.token = tok
 	}
 
-	if a.lease_duration == 0 {
-		a.lease_duration = 86400
+	a.maybeWriteTokenFile()
+
+	if a.token_lease_duration == 0 {
+		a.token_lease_duration = 86400
 	}
 	return nil
 }
@@ -130,11 +141,14 @@ func (a *AppAuthVaultMethod) RevokeMyToken() error {
 	return nil
 }
 
-// XXX context?
-func (a *AppAuthVaultMethod) fetchVaultURL(method string, path string, args ...string) (string, error) {
+// This is used to deal with vault calls _before_ there is a stable token,
+// before logging, but most things will use the previous call which uses the
+// method's token
+func (a *AppAuthVaultMethod) fetchVaultURLwithToken(token string, method string, path string, args ...string) (string, error) {
 	if a.client == nil {
 		return "", fmt.Errorf("Variable was not initialized")
 	}
+	fmt.Printf("fetching vault url: %s\n", path)
 
 	if len(args)%2 != 0 {
 		return "", fmt.Errorf("Uneven number of arugments")
@@ -167,7 +181,9 @@ func (a *AppAuthVaultMethod) fetchVaultURL(method string, path string, args ...s
 	}
 
 	req.Header.Set("User-Agent", "golangvaultXXX/0.50")
-	req.Header.Set("X-Vault-Token", a.token)
+	if token != "" {
+		req.Header.Set("X-Vault-Token", token)
+	}
 
 	if len(body) > 0 {
 		req.Header.Set("Content-Type", "application/json; charset=UTF-8")
@@ -188,6 +204,48 @@ func (a *AppAuthVaultMethod) fetchVaultURL(method string, path string, args ...s
 	}
 	bodyString := string(bodyBytes)
 	return bodyString, nil
+}
+
+func (a *AppAuthVaultMethod) fetchVaultURL(method string, path string, args ...string) (string, error) {
+	if a.token == "" {
+		if a.VaultSecretId != "" && a.VaultRoleId != "" {
+			fmt.Println("trying login")
+			if err := a.appRole_login(); err != nil {
+				return "", err
+			}
+		}
+	}
+
+	return a.fetchVaultURLwithToken(a.token, method, path, args...)
+}
+
+// checks to see if the set token is valid.  returns false if not or on
+// error
+func (a *AppAuthVaultMethod) checkToken(token string) bool {
+	type TokenData struct {
+		LeaseDuration float64 `json:"token_lease_duration"`
+	}
+	type Response struct {
+		Data TokenData `json:"data"`
+	}
+
+	if token == "" {
+		return false
+	}
+
+	body, e := a.fetchVaultURLwithToken(token, "GET", "auth/token/lookup-self")
+	if e != nil {
+		return false
+	}
+
+	var resp Response
+	if err := json.Unmarshal([]byte(body), &resp); err != nil {
+		return false
+	}
+
+	// ttl from lookup-self seems to be number of second remaining.
+	// XXX keep? a.token_lease_duration = int64(resp.Data.LeaseDuration)
+	return true
 }
 
 // XXX All this should be rethunk and possibly returning a type
@@ -268,7 +326,7 @@ func (a *AppAuthVaultMethod) List(path string) ([]string, error) {
 	type VData struct {
 		Keys []string `json:"keys"`
 	}
-		
+
 	type VList struct {
 		Data VData `json:"data"`
 	}
@@ -287,15 +345,16 @@ func (a *AppAuthVaultMethod) List(path string) ([]string, error) {
 	return answer.Data.Keys, nil
 }
 
-//
 // Delete metadata from Vault
 // Ex.: you have 'kv/data/myfirstapp/foo name=foo pass=bar'
 //
 // --> use 'VaultDelete' method on 'kv/myfirstapp/foo'
-//     in order to delete the secrets (name and pass in this example)
-// --> Use 'VaultDeleteMetadata' method on 'kv/myfirstapp/foo'
-//     in order to delete the 'foo' path.
 //
+//	in order to delete the secrets (name and pass in this example)
+//
+// --> Use 'VaultDeleteMetadata' method on 'kv/myfirstapp/foo'
+//
+//	in order to delete the 'foo' path.
 func (a *AppAuthVaultMethod) VaultDelete(path string) error {
 	_, e := a.fetchVaultURL("DELETE", path)
 	return e
@@ -307,252 +366,3 @@ func (a *AppAuthVaultMethod) VaultDeleteMetadata(path string) error {
 	_, e := a.fetchVaultURL("DELETE", path)
 	return e
 }
-
-/*
-#
-# takes $appauthal argument that's a hash of all the things required to
-# talk to vault.
-#
-sub new {
-	my $proto = shift;
-	my $class = ref($proto) || $proto;
-	my $self  = $class->SUPER::new(@_);
-
-	my $opt = &_options(@_);
-	if ( my $appauth = $opt->{appauthal} ) {
-		_process_arguments( $self, $appauth ) || return undef;
-
-		#
-		# This is required for appauthal mode but not useful in non-appauthal
-		# form.
-		#
-		foreach my $thing (qw(VaultPath )) {
-			if ( ( !exists( $appauth->{$thing} ) )
-				|| !defined( $appauth->{$thing} ) )
-			{
-				$errstr = "Mandatory Vault Parameter $thing not specified";
-				return undef;
-			}
-		}
-	} else {
-		_process_arguments( $self, $opt ) || return undef;
-
-		#
-		# Not valid for non-appauthal form
-		#
-		foreach my $thing (qw(VaultPath )) {
-			if ( ( exists( $appauth->{$thing} ) )
-				|| defined( $appauth->{$thing} ) )
-			{
-				$errstr = "$thing is not permitted in non-appauthal form";
-				return undef;
-			}
-		}
-
-		# now go make sure we are ready to do vault ops
-		$self->approle_login() || return undef;
-	}
-
-	return bless $self, $class;
-}
-
-sub _readtoken($) {
-	my $self = shift @_;
-
-	return undef if ( !exists( $self->{_appauthal}->{VaultTokenPath} ) );
-	return undef if ( !defined( $self->{_appauthal}->{VaultTokenPath} ) );
-	return undef if ( !-r $self->{_appauthal}->{VaultTokenPath} );
-
-	my $fn = $self->{_appauthal}->{VaultTokenPath};
-
-	#
-	# what to do if $token is already set?
-	#
-	my $token;
-	if ( ( my $fh = new FileHandle($fn) ) ) {
-		$token = $fh->getline();
-		$fh->close;
-		chomp($token);
-	}
-
-	$token;
-
-}
-
-#
-# return 0 if the approle dance needs to happen
-# return 1 if we have a valid token already.
-#
-sub _check_and_test_token_cache($) {
-	my $self = shift @_;
-
-	if ( !$self->{_token} ) {
-		my $token = $self->_readtoken();
-
-		delete( $self->{_token} );
-		delete( $self->{token_lease_duration} );
-
-		if ($token) {
-			my $url = sprintf "%s/v1/auth/token/lookup-self",
-			  $self->{_appauthal}->{VaultServer};
-
-			my $resp = $self->_fetchurl(
-				method => 'GET',
-				url    => $url,
-				token  => $token,
-			);
-
-			if ( $resp && $resp->{data} ) {
-				$self->{_token}               = $token;
-				$self->{token_lease_duration} = $resp->{data}->{ttl};
-			}
-		}
-	} else {
-		return (0);
-	}
-
-	if ( !defined( $self->{token_lease_duration} ) ) {
-		return 0;
-	}
-
-	# does not expire.
-	if ( $self->{token_lease_duration} == 0 ) {
-		return 1;
-	}
-
-	# ttl from lookup-self seems to be number of second remaining.
-	if ( $self->{token_lease_duration} > $ttl_refresh_seconds ) {
-		return 1;
-	}
-
-	return 0;
-}
-
-#
-# save the token if it's possible to save it.
-#
-# returns undef on fail, the token on success
-#
-sub _save_token($$) {
-	my $self = shift @_;
-	my $auth = shift @_;
-
-	my $token = $auth->{client_token};
-
-	return undef if ( !exists( $self->{_appauthal}->{VaultTokenPath} ) );
-	return undef if ( !defined( $self->{_appauthal}->{VaultTokenPath} ) );
-	my $tokenpath = $self->{_appauthal}->{VaultTokenPath};
-
-	my $d     = dirname($tokenpath);
-	my $tmpfn = $tokenpath . "_tmp.$$";
-
-	if ( !-w $tokenpath ) {
-		return undef if ( !-w $d );
-	}
-
-	my $curtok = $self->_readtoken( $self->{_appauthal}->{VaultTokenPath} );
-	return $token if ( $curtok && $curtok eq $token );
-
-	if ( !-w $d ) {
-
-		# gross but Vv
-		$tmpfn = $tokenpath;
-	}
-
-	if ( my $fh = new FileHandle( ">" . $tmpfn ) ) {
-		$fh->printf( "%s\n", $token );
-		$fh->close;
-
-		if ( $tmpfn ne $tokenpath ) {
-			my $oldfn = $tokenpath . "_old";
-			unlink($oldfn);
-			rename( $tokenpath, $oldfn );
-			if ( !rename( $tmpfn, $tokenpath ) ) {
-				rename( $oldfn, $tokenpath );
-			} else {
-				unlink($oldfn);
-			}
-		}
-	}
-
-	$token;
-}
-
-#
-# arguably needs to take the path asn an argument and become "read" or "get"
-#
-sub _get_vault_path($$) {
-	my $self = shift @_;
-	my $path = shift @_;
-
-	my $opt = &_options(@_);
-
-	my $url = sprintf "%s/v1/%s", $self->{_appauthal}->{VaultServer}, $path;
-
-	my $resp = $self->_fetchurl( url => $url, );
-
-	if ( !$resp ) {
-		$errstr = "did not receive credentials from vault server";
-		return undef;
-
-	}
-
-	if ( !$resp->{data} ) {
-		$errstr = "No dbauth data returned in vault request to $url";
-		return undef;
-	}
-	#
-	# dynamic credentials are different.  It's possible the smarts here
-	# should be moved to the caller.
-
-	#
-	my $dbauth;
-	if ( $resp->{data}->{data} ) {
-		$dbauth = $resp->{data}->{data};
-	} else {
-		$dbauth = $resp->{data};
-	}
-
-	if ( $resp->{lease_duration} ) {
-		$dbauth->{'lease_duration'} = $resp->{lease_duration};
-	}
-	$dbauth;
-}
-
-#
-# this does the login and fetches the key.
-#
-sub fetch_and_merge_dbauth {
-	my $self = shift @_;
-	my $auth = shift @_;
-
-	my $vaultpath = $self->{_appauthal}->{VaultPath};
-	if ( !$vaultpath ) {
-		$errstr = "Class was not instantiated for appauthal usage";
-		return undef;
-	}
-
-	$self->approle_login                           || return undef;
-	my $vault = $self->_get_vault_path($vaultpath) || return undef;
-
-	my $rv = {};
-	if ( exists( $auth->{import} ) ) {
-		foreach my $key ( keys %{ $auth->{import} } ) {
-			$rv->{$key} = $auth->{import}->{$key};
-		}
-	}
-	if ( exists( $auth->{map} ) ) {
-		foreach my $key ( keys %{ $auth->{map} } ) {
-			my $vkey = $auth->{map}->{$key};
-			$rv->{$key} = $vault->{$vkey};
-		}
-	}
-
-	if ( exists( $vault->{'lease_duration'} ) ) {
-		$rv->{'__Expiration'} = $vault->{'lease_duration'};
-	}
-
-	$rv;
-}
-
-*/

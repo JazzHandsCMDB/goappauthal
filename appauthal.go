@@ -19,7 +19,7 @@ type AppAuthALConfig struct {
 
 // This is a parsed entry
 type AppAuthAuthEntry interface {
-	BuildAuthenticateMap() map[string]string
+	BuildAuthenticateMap() (map[string]string, error)
 	GetExpiration() time.Time
 }
 

@@ -59,6 +59,7 @@ package govault
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"github.com/jazzhandscmdb/goappauthal"
 	"net/http"
@@ -87,16 +88,16 @@ type AppAuthVaultAuthEntry struct {
 // interface, and has all the global options processed and initialized when
 // talking to vault.
 type AppAuthVaultMethod struct {
-	CAPath         string
-	VaultServer    string
-	VaultTokenPath string
-	VaultRoleId    string
-	VaultSecretId  string
-	options        map[string]string
-	isInitialized  bool
-	token          string
-	client         *http.Client
-	lease_duration int64
+	CAPath               string
+	VaultServer          string
+	VaultTokenPath       string
+	VaultRoleId          string
+	VaultSecretId        string
+	options              map[string]string
+	isInitialized        bool
+	token                string
+	client               *http.Client
+	token_lease_duration int64
 }
 
 // Register that I exist with AppAuthAL
@@ -138,6 +139,59 @@ func (a *AppAuthVaultMethod) ShouldCache() bool {
 	return true
 }
 
+func (a *AppAuthVaultMethod) readTokenFile() (string, error) {
+	if a.VaultTokenPath == "" {
+		return "", fmt.Errorf("No Token File Specified")
+	}
+	if token, err := os.ReadFile(a.VaultTokenPath); err == nil {
+		t := strings.TrimSuffix(string(token), "\n")
+		return t, nil
+	} else {
+		return "", err
+	}
+}
+func (a *AppAuthVaultMethod) maybeWriteTokenFile() error {
+	// no token path, so nothing to do.
+	if a.VaultTokenPath == "" {
+		return nil
+	}
+	oldtok, err := a.readTokenFile()
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+
+	// content files are the same, so nothing to do
+	if oldtok == a.token {
+		return nil
+	}
+
+	pid := fmt.Sprintf("%d", os.Getpid())
+	tmpfile := a.VaultTokenPath + "." + string(pid)
+	if fh, err := os.OpenFile(tmpfile, os.O_CREATE|os.O_WRONLY, 0400); err == nil {
+		fh.Write([]byte(a.token))
+		fh.Write([]byte("\n"))
+		fh.Close()
+
+		var stashfile string
+		if _, err := os.Stat(a.VaultTokenPath); errors.Is(err, os.ErrNotExist) {
+			if e := os.Rename(tmpfile, a.VaultTokenPath); e != nil {
+				os.Remove(tmpfile)
+				return e
+			}
+			return nil
+		}
+
+		stashfile = a.VaultTokenPath + ".stash" + string(pid)
+		// ignoring errors on these three
+		os.Rename(a.VaultTokenPath, stashfile)
+		os.Rename(tmpfile, a.VaultTokenPath)
+		os.Remove(stashfile)
+		return nil
+	} else {
+		return err
+	}
+}
+
 // Does whatever initialization is reqauired from an interface which came
 // from an appauthal file.  The "vault" sections of the options stanza.
 func (a *AppAuthVaultMethod) Initialize(inmap interface{}, globals map[string]interface{}) error {
@@ -168,7 +222,22 @@ func (a *AppAuthVaultMethod) Initialize(inmap interface{}, globals map[string]in
 	}
 	if v, ok := m["VaultTokenPath"]; ok {
 		a.VaultTokenPath = v.(string)
+		//
+		// Sanity checks
+		if (a.VaultSecretId == "" && a.VaultRoleId != "") ||
+			(a.VaultSecretId != "" && a.VaultRoleId == "") {
+			return fmt.Errorf("Either both Secret and Role information or neither must be passed when using tokens")
+		}
+	} else {
+		if a.VaultRoleId == "" && a.VaultSecretId == "" {
+			return fmt.Errorf("Must specify both a Role and Secret Id")
+		}
 	}
+
+	if _, ok := m["VaultPath"]; ok {
+		return fmt.Errorf("VaultPath may not be specified in options")
+	}
+
 	if v, ok := m["VaultServer"]; ok {
 		a.VaultServer = v.(string)
 	} else {
@@ -181,14 +250,14 @@ func (a *AppAuthVaultMethod) Initialize(inmap interface{}, globals map[string]in
 		a.VaultServer = strings.TrimSuffix(a.VaultServer, "/")
 	}
 
+	if a.VaultSecretId == "" && a.VaultRoleId == "" && a.VaultTokenPath == "" {
+		return fmt.Errorf("Must specifyt secret and role id or token path")
+	}
+
 	//
 	// All the vault things rae setup, time to initalize things around
 	// the client; really this just needs to be the CAPath
 	a.initializeVaultHTTPClient()
-
-	if err := a.appRole_login(); err != nil {
-		return err
-	}
 
 	// deal with doubles that aren't supposed to exist
 	return nil
@@ -235,21 +304,21 @@ func (a *AppAuthVaultMethod) BuildAppAuthAL(inmap interface{}) (goappauthal.AppA
 }
 
 // / XXX probably need to have error here.  _sigh_
-func (a *AppAuthVaultAuthEntry) BuildAuthenticateMap() map[string]string {
+func (a *AppAuthVaultAuthEntry) BuildAuthenticateMap() (map[string]string, error) {
 	rv := make(map[string]string)
 
 	if a.haveCache {
-		return a.cache
+		return a.cache, nil
 	}
 
 	metadata, e := a.method.VaultReadRaw(a.path)
 	if e != nil {
-		return rv
+		return nil, e
 	}
 
 	vaultentry, e := a.method.ExtractVaultKV(metadata)
 	if e != nil {
-		return rv
+		return nil, e
 	}
 
 	//
@@ -280,11 +349,13 @@ func (a *AppAuthVaultAuthEntry) BuildAuthenticateMap() map[string]string {
 	// if we do not provide a lease, the caching magic comes up with one
 
 	// perhaps not the best place for this?
-	a.method.RevokeMyToken()
+	if a.method.VaultTokenPath == "" {
+		a.method.RevokeMyToken()
+	}
 
 	a.haveCache = true
 	a.cache = rv
-	return a.cache
+	return a.cache, nil
 }
 
 func (a *AppAuthVaultMethod) BuildCacheKey(rawentry goappauthal.AppAuthAuthEntry) string {
@@ -316,154 +387,3 @@ func (a *AppAuthVaultMethod) BuildCacheKey(rawentry goappauthal.AppAuthAuthEntry
 func (a *AppAuthVaultAuthEntry) GetExpiration() time.Time {
 	return a.expiration
 }
-
-/*
-sub _process_arguments($$) {
-	my $self    = shift;
-	my $appauth = shift;
-
-	#
-	# if VaultTokenPath is set, then the Role/Secrets are optional and it
-	# is assumed that something external maintains this file.
-	#
-	# If it's not set, the minimum required to enable approle login is
-	# required.
-	#
-
-	my $hasrole;
-	my $hassecret;
-	my $hastoken;
-
-	if ( $appauth->{VaultTokenPath} ) {
-		$self->{VaultTokenPath} = $appauth->{VaultTokenPath};
-		$hastoken = 1;
-	}
-
-	if (   exists( $appauth->{VaultSecretId} )
-		|| exists( $appauth->{VaultSecretIdPath} ) )
-	{
-		$hassecret = 1;
-	}
-
-	if (   exists( $appauth->{VaultRoleId} )
-		|| exists( $appauth->{VaultRoleIdPath} ) )
-	{
-		$hasrole = 1;
-	}
-
-	if ($hastoken) {
-		if ( ( $hassecret && !$hasrole ) || ( $hasrole && !$hassecret ) ) {
-			$errstr =
-			  "Either both Secret and Role information or neither must be passed when using tokens";
-			return undef;
-		}
-	} elsif ( !$hassecret && !$hasrole ) {
-		$errstr = "Token file must exist when secret/role data is not provided";
-		return undef;
-	}
-
-	#
-	# Either VaultSecretIdPath or VaultSecretId must be set.  Both may
-	# not be set.  In the path case, the file is assumed to contain just
-	# the role id similar to VaultSecretIdPath
-	#
-	if (   exists( $appauth->{VaultSecretId} )
-		&& exists( $appauth->{VaultSecretIdPath} ) )
-	{
-		$errstr = "Both VaultSecretIdPath and VaultSecretId are set.";
-		return undef;
-	} elsif ( exists( $appauth->{VaultSecretIdPath} ) ) {
-		if ( ( my $fh = new FileHandle( $appauth->{VaultSecretIdPath} ) ) ) {
-			while ( my $l = $fh->getline() ) {
-				chomp($l);
-				$l =~ s/#.*$//;
-				next if ( $l =~ /^\s*$/ );
-				$self->{VaultSecretId} = $l;
-				last;
-			}
-			$fh->close;
-		} else {
-			$errstr = sprintf "Unable to read Vault Secret Id from %s: %s",
-			  $appauth->{VaultSecretIdPath},
-			  $!;
-			return undef;
-		}
-	} elsif ( exists( $appauth->{VaultSecretId} ) ) {
-		$self->{VaultSecretId} = $appauth->{VaultSecretId};
-	} elsif ( !$hastoken ) {
-		$errstr = "Neither VaultSecretIdPath nor VaultSecetId are set.";
-		return undef;
-	}
-	#
-	# Either VaultRoleIdPath or VaultRoleId need to be set.  Both can not be
-	# set.  In the path case, the file is assumed to contain just the role
-	# id similar to VaultSecretIdPath
-	#
-	if (   exists( $appauth->{VaultRoleId} )
-		&& exists( $appauth->{VaultRoleIdPath} ) )
-	{
-		$errstr = "Both VaultRoleIdPath and VaultRoleId are set.";
-		return undef;
-	} elsif ( exists( $appauth->{VaultRoleIdPath} ) ) {
-		if ( ( my $fh = new FileHandle( $appauth->{VaultRoleIdPath} ) ) ) {
-			while ( my $l = $fh->getline() ) {
-				chomp($l);
-				$l =~ s/#.*$//;
-				next if ( $l =~ /^\s*$/ );
-				$self->{VaultRoleId} = $l;
-				last;
-			}
-			$fh->close;
-		} else {
-			$errstr = sprintf "Unable to read Vault Role Id from %s: %s",
-			  $appauth->{VaultRoleIdPath},
-			  $!;
-			return undef;
-		}
-	} elsif ( exists( $appauth->{VaultRoleId} ) ) {
-		$self->{VaultRoleId} = $appauth->{VaultRoleId};
-	} elsif ( !$hastoken ) {
-		$errstr = "Neither VaultRoleIdPath nor VaultRoleId are set.";
-		return undef;
-	}
-
-	# extra check in case the above failed.
-	if ( !$hastoken && !( defined( $self->{VaultSecretId} ) ) ) {
-		$errstr = "VaultSecretId could not be determined.";
-		return undef;
-	}
-
-	# extra check in case the above failed.
-	if ( !$hastoken && !( defined( $self->{VaultRoleId} ) ) ) {
-		$errstr = "VaultRoleId could not be determined.";
-		return undef;
-	}
-
-	if (   $hastoken
-		&& !( defined( $self->{VaultRoleId} ) )
-		&& !( defined( $self->{VaultSecretId} ) ) )
-	{
-		if ( !-r $self->{VaultTokenPath} ) {
-			$errstr = sprintf "Token file required but does not exist: %s",
-			  $self->{VaultTokenPath};
-			return undef;
-		}
-	}
-
-	my $capath = $ENV{'VAULT_CAPATH'} || $appauth->{CAPath};
-	if ( $capath) {
-		if ( -f $capath ) {
-			$self->{sslargs}->{SSL_ca_file} = $capath;
-		} elsif ( -d $capath ) {
-			$self->{sslargs}->{SSL_ca_path} = $capath;
-		} else {
-			$errstr = sprintf "Invalid CAPath %s", $capath;
-			return undef;
-		}
-	}
-
-	$self->{_appauthal} = $appauth;
-}
-
-
-*/
