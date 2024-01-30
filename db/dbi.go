@@ -201,7 +201,6 @@ func SetSessionUser(dbc *sql.DB, login string) error {
 	if driverName == "*stdlib.Driver" { // pgx
 		blah := fmt.Sprintf("set jazzhands.appuser to '%s';", login)
 		a, e := dbc.Exec(blah)
-		fmt.Printf("%s: 1: %#v 2: %#v ;fin", blah, a, e)
 		return nil
 	} else if driverName == "*oracle.Driver" { // untested
 		dbc.Exec(fmt.Sprintf("dbms_session.set_identifier ('%s')"), login)
