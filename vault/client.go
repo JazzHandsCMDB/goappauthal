@@ -39,7 +39,7 @@ import (
 func (a *AppAuthVaultMethod) processCAdir(path string, pool *x509.CertPool) error {
 	entries, err := os.ReadDir(path)
 	if err != nil {
-		return fmt.Errorf("ReadDir(%s): %e", path, err)
+		return fmt.Errorf("ReadDir(%s): %w", path, err)
 	}
 	for _, entry := range entries {
 		data, err := os.ReadFile(path + "/" + entry.Name())
@@ -55,19 +55,19 @@ func (a *AppAuthVaultMethod) initializeVaultHTTPClient() error {
 	caCertPool := x509.NewCertPool()
 	if a.CAPath != "" {
 		if info, err := os.Stat(a.CAPath); err != nil {
-			return fmt.Errorf("Stat(%s): %e", a.CAPath, err)
+			return fmt.Errorf("Stat(%s): %w", a.CAPath, err)
 		} else if info.IsDir() {
 			a.processCAdir(a.CAPath, caCertPool)
 		} else {
 			if caCert, err := os.ReadFile(a.CAPath); err != nil {
-				return fmt.Errorf("ReadFile(%s): %e", a.CAPath, err)
+				return fmt.Errorf("ReadFile(%s): %w", a.CAPath, err)
 			} else {
 				caCertPool.AppendCertsFromPEM(caCert)
 			}
 		}
 	} else {
 		if c, err := x509.SystemCertPool(); err != nil {
-			return fmt.Errorf("x509.SystemCertPool(): %e", err)
+			return fmt.Errorf("x509.SystemCertPool(): %w", err)
 		} else {
 			caCertPool = c
 		}
@@ -78,21 +78,34 @@ func (a *AppAuthVaultMethod) initializeVaultHTTPClient() error {
 	return nil
 }
 
-// login using an approle, but use a token if the tokenpath is set and it
-// exists.  stash the token in said file if it's a different one.
-func (a *AppAuthVaultMethod) appRole_login() error {
+// Figure out a token by whatever means is appropriate.
+func (a *AppAuthVaultMethod) makeATokenHappen() error {
 	if a.token == "" {
 		tok, err := a.readTokenFile()
 		if err == nil {
 			if a.checkToken(tok) == true {
+				a.token = tok
 				return nil
 			}
 		}
 	}
+	if a.token == "" {
+		if err := a.appRole_login(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
-	body, e := a.fetchVaultURLwithToken("", "POST", "auth/approle/login", "role_id", a.VaultRoleId, "secret_id", a.VaultSecretId)
+// login using an approle.  Will replace token that may be already retrieved
+func (a *AppAuthVaultMethod) appRole_login() error {
+	args := make(map[string]string)
+	args["role_id"] = a.VaultRoleId
+	args["secret_id"] = a.VaultSecretId
+
+	body, e := a.fetchVaultURLwithToken("", "POST", "auth/approle/login", args)
 	if e != nil {
-		return fmt.Errorf("a.fetchVaultURLwithToken(login): %e", e)
+		return fmt.Errorf("a.fetchVaultURLwithToken(login): %w", e)
 	}
 
 	/*
@@ -110,7 +123,7 @@ func (a *AppAuthVaultMethod) appRole_login() error {
 
 	mymap := make(map[string]interface{})
 	if err := json.Unmarshal([]byte(body), &mymap); err != nil {
-		return fmt.Errorf("json.Unmarshal(vault auth response): %e", err)
+		return fmt.Errorf("json.Unmarshal(vault auth response): %w", err)
 	}
 
 	auth := make(map[string]string)
@@ -132,11 +145,9 @@ func (a *AppAuthVaultMethod) appRole_login() error {
 		}
 	}
 
-	fmt.Println("looking for cliecnt token in ", auth)
 	if tok, ok := auth["client_token"]; !ok {
 		return fmt.Errorf("Response did not include a Client token")
 	} else {
-		fmt.Println("saving token")
 		a.token = tok
 	}
 
@@ -154,7 +165,7 @@ func (a *AppAuthVaultMethod) appRole_login() error {
 func (a *AppAuthVaultMethod) RevokeMyToken() error {
 	_, e := a.fetchVaultURL("POST", "auth/token/revoke-self")
 	if e != nil {
-		return fmt.Errorf("revoke-self: %e", e)
+		return fmt.Errorf("revoke-self: %w", e)
 	}
 
 	a.token = ""
@@ -164,30 +175,23 @@ func (a *AppAuthVaultMethod) RevokeMyToken() error {
 // This is used to deal with vault calls _before_ there is a stable token,
 // before logging, but most things will use the previous call which uses the
 // method's token
-func (a *AppAuthVaultMethod) fetchVaultURLwithToken(token string, method string, path string, args ...string) (string, error) {
+func (a *AppAuthVaultMethod) fetchVaultURLwithToken(token string, method string, path string, body ...any) (string, error) {
+	if len(body) > 1 {
+		return "", fmt.Errorf("Too many bodies")
+	}
 	if a.client == nil {
 		return "", fmt.Errorf("Variable was not initialized")
-	}
-	fmt.Printf("fetching vault url: %s\n", path)
-
-	if len(args)%2 != 0 {
-		return "", fmt.Errorf("Uneven number of arugments")
 	}
 
 	url := fmt.Sprintf("%s/v1/%s", a.VaultServer, path)
 
-	body := make(map[string]string)
-	for i := 0; i < len(args); i += 2 {
-		body[args[i]] = args[i+1]
-	}
-
 	var bodyjson []byte
-	if len(body) > 0 {
-		b, err := json.Marshal(body)
+	for _, arg := range body {
+		b, err := json.Marshal(arg)
 		if err != nil {
-			return "", fmt.Errorf("json.Marshal vault body: %e", err)
+			return "", fmt.Errorf("json.Marshal vault body: %w", err)
 		}
-		bodyjson = b
+		bodyjson = append(bodyjson, b...)
 	}
 
 	// begin making the http request
@@ -195,7 +199,7 @@ func (a *AppAuthVaultMethod) fetchVaultURLwithToken(token string, method string,
 	var req *http.Request
 	if r, err := http.NewRequestWithContext(context.Background(),
 		method, url, bytes.NewBuffer(bodyjson)); err != nil {
-		return "", fmt.Errorf("HTTP Request(%s): %e", path, err)
+		return "", fmt.Errorf("HTTP Request(%s): %w", path, err)
 	} else {
 		req = r
 	}
@@ -205,13 +209,13 @@ func (a *AppAuthVaultMethod) fetchVaultURLwithToken(token string, method string,
 		req.Header.Set("X-Vault-Token", token)
 	}
 
-	if len(body) > 0 {
+	if body != nil {
 		req.Header.Set("Content-Type", "application/json; charset=UTF-8")
 	}
 
 	res, err := a.client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("a.Client.Do(%s): %e", path, err)
+		return "", fmt.Errorf("a.Client.Do(%s): %w", path, err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
@@ -220,19 +224,21 @@ func (a *AppAuthVaultMethod) fetchVaultURLwithToken(token string, method string,
 
 	bodyBytes, err := io.ReadAll(res.Body)
 	if err != nil {
-		return "", fmt.Errorf("ReadAll(%s): %e", path, err)
+		return "", fmt.Errorf("ReadAll(%s): %w", path, err)
 	}
 	bodyString := string(bodyBytes)
 	return bodyString, nil
 }
 
-func (a *AppAuthVaultMethod) fetchVaultURL(method string, path string, args ...string) (string, error) {
+func (a *AppAuthVaultMethod) fetchVaultURL(method string, path string, args ...any) (string, error) {
+	err := a.makeATokenHappen()
+
+	if err != nil {
+		return "", fmt.Errorf("fetchVaultURL-makeATokenHappen: %w", err)
+	}
+
 	if a.token == "" {
-		if a.VaultSecretId != "" && a.VaultRoleId != "" {
-			if err := a.appRole_login(); err != nil {
-				return "", err
-			}
-		}
+		return "", fmt.Errorf("No Vault Token (fetchVaultURL)")
 	}
 
 	return a.fetchVaultURLwithToken(a.token, method, path, args...)
@@ -318,25 +324,35 @@ func (a *AppAuthVaultMethod) VaultRead(path string) (map[string]string, error) {
 
 	mymap, e := a.ExtractVaultKV(rawmap)
 	if e != nil {
-		return errmap, fmt.Errorf("ExtractVaultKV: %e", e)
+		return errmap, fmt.Errorf("ExtractVaultKV: %w", e)
 	}
 
 	return mymap, nil
 }
 
 func (a *AppAuthVaultMethod) VaultWriteMap(path string, inMap map[string]string) error {
-	var args []string
-	for k, v := range inMap {
-		args = append(args, k, v)
+	type writeArgs struct {
+		Data map[string]string `json:"data"`
 	}
 
-	_, e := a.fetchVaultURL("POST", path, args...)
+	var args writeArgs
+	args.Data = inMap
+
+	_, e := a.fetchVaultURL("POST", path, args)
 	return e
 }
 
 func (a *AppAuthVaultMethod) VaultWrite(path string, args ...string) error {
-	_, e := a.fetchVaultURL("POST", path, args...)
-	return e
+	if len(args)%2 != 0 {
+		return fmt.Errorf("Must specify key value pairs")
+	}
+
+	body := make(map[string]string)
+	for i := 0; i < len(args); i += 2 {
+		body[args[i]] = args[i+1]
+	}
+
+	return a.VaultWriteMap(path, body)
 }
 
 func (a *AppAuthVaultMethod) List(path string) ([]string, error) {
@@ -358,7 +374,7 @@ func (a *AppAuthVaultMethod) List(path string) ([]string, error) {
 
 	var answer VList
 	if err := json.Unmarshal([]byte(body), &answer); err != nil {
-		return rv_err, fmt.Errorf("json.Unmarshal(%s): %e", path, nil)
+		return rv_err, fmt.Errorf("json.Unmarshal(%s): %w", path, nil)
 	}
 
 	return answer.Data.Keys, nil

@@ -54,8 +54,10 @@ func init() {
 	goappauthal.RegisterMethod("vault", &a)
 }
 
-// given a filename and value key, must have only one and return the correct
-// value (possibly by reading the file)
+/*
+	given a filename and value key, must have only one and return the correct
+	value (possibly by reading the file)
+*/
 func (a *AppAuthVaultMethod) findBestValue(m map[string]interface{}, valueKey, fileNameKey string) (string, error) {
 	value, verv := m[valueKey].(string)
 	fn, fnkeyv := m[fileNameKey].(string)
@@ -70,19 +72,23 @@ func (a *AppAuthVaultMethod) findBestValue(m map[string]interface{}, valueKey, f
 
 	contents, err := os.ReadFile(fn)
 	if err != nil {
-		return "", fmt.Errorf("ReadFile(%s): %e", err)
+		return "", fmt.Errorf("ReadFile(%s): %w", err)
 	}
 
 	return strings.TrimSpace(string(contents)), nil
 }
 
-// GetName returns the nmame of the method ("vault")
+/*
+	GetName returns the nmame of the method ("vault")
+*/
 func (a *AppAuthVaultMethod) GetName() string {
 	return "vault"
 }
 
-// ShouldCache indicates if it is reasonable to cache credentials from this
-// module.   Returns true in this case.
+/*
+	ShouldCache indicates if it is reasonable to cache credentials from this
+	module.   Returns true in this case.
+*/
 func (a *AppAuthVaultMethod) ShouldCache() bool {
 	return true
 }
@@ -95,9 +101,10 @@ func (a *AppAuthVaultMethod) readTokenFile() (string, error) {
 		t := strings.TrimSuffix(string(token), "\n")
 		return t, nil
 	} else {
-		return "", fmt.Errorf("ReadFiel(%s): %e", a.VaultTokenPath, err)
+		return "", fmt.Errorf("ReadFile(%s): %w", a.VaultTokenPath, err)
 	}
 }
+
 func (a *AppAuthVaultMethod) maybeWriteTokenFile() error {
 	// no token path, so nothing to do.
 	if a.VaultTokenPath == "" {
@@ -105,7 +112,7 @@ func (a *AppAuthVaultMethod) maybeWriteTokenFile() error {
 	}
 	oldtok, err := a.readTokenFile()
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("ReadTokenFile(): %e", err)
+		return fmt.Errorf("ReadTokenFile(): %w", err)
 	}
 
 	// content files are the same, so nothing to do
@@ -124,7 +131,7 @@ func (a *AppAuthVaultMethod) maybeWriteTokenFile() error {
 		if _, err := os.Stat(a.VaultTokenPath); errors.Is(err, os.ErrNotExist) {
 			if e := os.Rename(tmpfile, a.VaultTokenPath); e != nil {
 				os.Remove(tmpfile)
-				return fmt.Errorf("Remove(%s): %e", tmpfile, e)
+				return fmt.Errorf("Remove(%s): %w", tmpfile, e)
 			}
 			return nil
 		}
@@ -136,12 +143,14 @@ func (a *AppAuthVaultMethod) maybeWriteTokenFile() error {
 		os.Remove(stashfile)
 		return nil
 	} else {
-		return fmt.Errorf("OpenFile(%s): %e", tmpfile, err)
+		return fmt.Errorf("OpenFile(%s): %w", tmpfile, err)
 	}
 }
 
-// Does whatever initialization is reqauired from an interface which came
-// from an appauthal file.  The "vault" sections of the options stanza.
+/*
+	Does whatever initialization is reqauired from an interface which came
+	from an appauthal file.  The "vault" sections of the options stanza.
+*/
 func (a *AppAuthVaultMethod) Initialize(inmap interface{}, globals map[string]interface{}) error {
 	a.isInitialized = true
 
@@ -152,13 +161,13 @@ func (a *AppAuthVaultMethod) Initialize(inmap interface{}, globals map[string]in
 	m := inmap.(map[string]interface{})
 
 	if val, err := a.findBestValue(m, "VaultSecretId", "VaultSecretIdPath"); err != nil {
-		return fmt.Errorf("No SecretId: %e", err)
+		return fmt.Errorf("No SecretId: %w", err)
 	} else {
 		a.VaultSecretId = val
 	}
 
 	if val, err := a.findBestValue(m, "VaultRoleId", "VaultRoleIdPath"); err != nil {
-		return fmt.Errorf("No RoleId: %e", err)
+		return fmt.Errorf("No RoleId: %w", err)
 	} else {
 		a.VaultRoleId = val
 	}
@@ -211,8 +220,10 @@ func (a *AppAuthVaultMethod) Initialize(inmap interface{}, globals map[string]in
 	return nil
 }
 
-// Build a usable appauthal structure given a previously initialized struct
-// and a current file
+/*
+	Build a usable appauthal structure given a previously initialized struct
+	and a current file
+*/
 func (a *AppAuthVaultMethod) BuildAppAuthAL(inmap interface{}) (goappauthal.AppAuthAuthEntry, error) {
 	var rv AppAuthVaultAuthEntry
 	rv.imp = make(map[string]string)
@@ -251,6 +262,44 @@ func (a *AppAuthVaultMethod) BuildAppAuthAL(inmap interface{}) (goappauthal.AppA
 	return &rv, nil
 }
 
+/*
+given an appauthal entry, return a handle that can be used for vault
+operations.  This is kind of a bastardization of appauthal, but here we
+are.
+*/
+func CreateVaultHandle(appauthname string) (*AppAuthVaultMethod, error) {
+	file, err := goappauthal.FindAndProcessAuth(appauthname)
+	if err != nil {
+		return nil, fmt.Errorf("Could not find vault appauthal entry information")
+	}
+
+	rawopt := file.(map[string]interface{})
+
+	opts := rawopt["options"].(map[string]interface{})
+	vaultopts := opts["vault"]
+
+	if vaultopts == nil {
+		return nil, fmt.Errorf("No vault subsection: $#v", opts)
+	}
+
+	h, err := goappauthal.GetMethod("vault")
+	if err != nil {
+		return nil, fmt.Errorf("Got not setup Vault Login Method : %w", err)
+	}
+	if err := h.Initialize(vaultopts, opts); err != nil {
+		return nil, fmt.Errorf("Initialize Vault Method: %w", err)
+	}
+
+	if vhndl, ok := h.(*AppAuthVaultMethod); !ok {
+		return nil, fmt.Errorf("Unable to convert vault handle: %w", err)
+	} else {
+		return vhndl, nil
+	}
+}
+
+/*
+	returns a unique filename that is suitable for caching the vault path.
+*/
 func (a *AppAuthVaultMethod) BuildCacheKey(rawentry goappauthal.AppAuthAuthEntry) string {
 	entry := rawentry.(*AppAuthVaultAuthEntry)
 

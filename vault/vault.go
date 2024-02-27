@@ -85,12 +85,12 @@ func (a *AppAuthVaultAuthEntry) BuildAuthenticateMap() (map[string]string, error
 
 	metadata, e := a.method.VaultReadRaw(a.path)
 	if e != nil {
-		return nil, fmt.Errorf("VaultReadRaw(%s): %e", a.path, e)
+		return nil, fmt.Errorf("VaultReadRaw(%s): %w", a.path, e)
 	}
 
 	vaultentry, e := a.method.ExtractVaultKV(metadata)
 	if e != nil {
-		return nil, fmt.Errorf("ExtractVaultKV(): %e", e)
+		return nil, fmt.Errorf("ExtractVaultKV(): %w", e)
 	}
 
 	//

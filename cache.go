@@ -163,7 +163,6 @@ func putCachedAuth(method AppAuthMethod, entry AppAuthAuthEntry, defaultExpirati
 	if expire.IsZero() {
 		now := time.Now()
 		expire = now.Add(defaultExpiration)
-		fmt.Printf("+++ adding %s and getting %s\n", defaultExpiration, expire)
 	}
 
 	m, e := entry.BuildAuthenticateMap()
